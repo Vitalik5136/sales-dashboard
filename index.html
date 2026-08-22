@@ -103,6 +103,9 @@
 const SHEET_ID = "1jBYtZlilfh3cDq1Tsm5z4_234c-bLPxMn4vcNfbv8qY";
 const REFRESH_MS = 60000;
 const MONTHS = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+// Запасные названия точек — по порядку колонок. Используются, если строка «ТОчки»
+// не попала в ответ Google. Порядок должен совпадать с порядком колонок в таблице.
+const STORE_NAMES = ["Маршал","Мебель Люботин","Феромон","Интернет-магазин","Ивано-Франковск","Львов","Инстаграмм","Универмаг"];
 
 let offset = 0;              // 0 = текущий месяц, -1 = прошлый
 let timer = null;
@@ -166,68 +169,88 @@ function showError(name, msg){
 function parse(data){
   const rows = data.table.rows.map(r => (r.c || []).map(c => c ? c.v : null));
 
-  // gviz иногда забирает верхние строки листа в подписи колонок.
-  // Возвращаем их обратно как обычную строку, чтобы не потерять «План/Факт» и названия точек.
+  // gviz иногда забирает верхние строки листа в подписи колонок — возвращаем их как обычные строки
   const labels = (data.table.cols || []).map(c => c && c.label ? String(c.label).trim() : "");
-  const meaningful = labels.filter(l => l && !/^[A-Z]{1,2}$/.test(l));
-  if (meaningful.length){
-    // подпись может склеить несколько строк шапки — разбиваем обратно
-    const first = labels.map(l => l.split(/\s{2,}|\n/)[0] || null);
-    const second = labels.map(l => { const p = l.split(/\s{2,}|\n/); return p.length > 1 ? p.slice(1).join(" ") : null; });
-    if (second.some(Boolean)) rows.unshift(second);
-    rows.unshift(first);
+  if (labels.some(l => l && !/^[A-Z]{1,2}$/.test(l))){
+    const parts = labels.map(l => l.split(/\s{2,}|\n/).filter(Boolean));
+    const depth = parts.reduce((m,p) => Math.max(m, p.length), 0);
+    for (let k = depth - 1; k >= 0; k--) rows.unshift(parts.map(p => p[k] || null));
   }
 
-  const ncols = rows.reduce((m,r) => Math.max(m, r.length), 0);
   const cell = (r,i) => (r && i < r.length) ? r[i] : null;
 
-  let headerRow=null, namesRow=null, totalsRow=null;
-  const days=[];
-
-  for (const r of rows){
-    const c0 = txt(cell(r,0));
-    if (!headerRow && r.filter(v => /план/i.test(txt(v))).length >= 2) headerRow = r;
-    if (!namesRow && r !== headerRow && /^т\s*очки|^точки/i.test(c0)) namesRow = r;
-    if (!totalsRow && /^дата$/i.test(c0)) totalsRow = r;
-    const d = num(c0);
-    if (d !== null && Number.isInteger(d) && d >= 1 && d <= 31) days.push({ day:d, row:r });
-  }
-  if (!headerRow) throw new Error("не найдена строка с колонками План/Факт. Первые строки листа: " +
-    rows.slice(0,4).map(r => r.slice(0,6).map(v => txt(v) || "·").join(" | ")).join("  //  "));
-
-  // если строки «ТОчки» нет — берём верхнюю строку, где стоят текстовые названия
-  if (!namesRow){
-    namesRow = rows.slice(0,6).find(r => r !== headerRow &&
-      r.slice(1).filter(v => txt(v) && num(v) === null && !/план|факт|выполнен/i.test(txt(v))).length >= 2) || null;
-  }
-
-  // разбиваем колонки на тройки план/факт/%
-  const stores=[]; let totalIdx=null;
-  for (let i=1; i+2 < ncols; i+=3){
-    const hdrTrio = [cell(headerRow,i), cell(headerRow,i+1), cell(headerRow,i+2)].map(txt).join(" ");
-    const nameTrio = [cell(namesRow,i), cell(namesRow,i+1), cell(namesRow,i+2)]
-      .map(v => txt(v).replace(/^\\?\[merged\\?\]\s*/i,"")).filter(Boolean);
-    if (/ОБЩИЙ|ИТОГО/i.test(hdrTrio) || /ОБЩИЙ|ИТОГО/i.test(nameTrio.join(" "))){ totalIdx = i; continue; }
-    if (!/план/i.test(hdrTrio)) continue;
-    // название точки: из строки «ТОчки», иначе вытаскиваем из подписи колонки
-    let name = nameTrio[0];
-    if (!name){
-      name = txt(cell(headerRow,i)).replace(/план|факт|%\s*выполнения|%/gi,"").trim();
+  // строки дней: в первой колонке число 1..31 и есть числовые данные
+  const days = [];
+  let firstDayIdx = -1;
+  rows.forEach((r,idx) => {
+    const d = num(cell(r,0));
+    const filled = r.slice(1).filter(v => num(v) !== null).length;
+    if (d !== null && Number.isInteger(d) && d >= 1 && d <= 31 && filled >= 2){
+      if (firstDayIdx < 0) firstDayIdx = idx;
+      days.push({ day:d, row:r });
     }
-    if (!name) name = "Точка " + (stores.length + 1);
-    stores.push({ name, i });
+  });
+  if (!days.length) throw new Error("не найдены строки с днями месяца. Первые строки листа: " +
+    rows.slice(0,3).map(r => r.slice(0,6).map(v => txt(v) || "·").join(" | ")).join("  //  "));
+
+  // последняя заполненная колонка — по строкам дней
+  let lastCol = 0;
+  days.forEach(({row}) => row.forEach((v,i) => { if (v !== null && v !== "") lastCol = Math.max(lastCol, i); }));
+
+  // строка месячных итогов («Дата»): последняя строка перед днями с числами
+  let totalsRow = null;
+  for (let i = firstDayIdx - 1; i >= 0; i--){
+    if (rows[i].slice(1).filter(v => num(v) !== null).length >= 3){ totalsRow = rows[i]; break; }
   }
 
-  // месячные план/факт по точкам: строка «Дата», иначе сумма по дням
+  // строка названий точек: «ТОчки» или верхняя строка с текстом
+  let namesRow = rows.slice(0, firstDayIdx < 0 ? 6 : firstDayIdx)
+    .find(r => /^т\s*очки|^точки/i.test(txt(cell(r,0))) &&
+               r.slice(1).filter(v => /^(план|факт)$/i.test(txt(v))).length < 2) || null;
+  if (!namesRow){
+    namesRow = rows.slice(0, firstDayIdx < 0 ? 6 : firstDayIdx).find(r =>
+      r.slice(1).filter(v => txt(v) && num(v) === null && !/план|факт|выполнен|общий|итого/i.test(txt(v))).length >= 2) || null;
+  }
+  const nameAt = i => {
+    const trio = [cell(namesRow,i), cell(namesRow,i+1), cell(namesRow,i+2)]
+      .map(v => txt(v).replace(/^\\?\[merged\\?\]\s*/i,"")).filter(Boolean);
+    return trio[0] || null;
+  };
+
+  // колонки идут тройками: план / факт / % выполнения
+  const trios = [];
+  for (let i = 1; i + 2 <= lastCol; i += 3){
+    const used = days.some(({row}) => num(cell(row,i)) !== null || num(cell(row,i+1)) !== null);
+    if (used) trios.push(i);
+  }
+  if (!trios.length) throw new Error("не удалось разобрать колонки плана и факта");
+
+  // последняя тройка — «ОБЩИЙ», если её план совпадает с суммой остальных
+  let totalIdx = null;
+  if (trios.length > 1){
+    const last = trios[trios.length - 1];
+    const sumRow = totalsRow || days[0].row;
+    const rest = trios.slice(0,-1).reduce((a,i) => a + (num(cell(sumRow,i)) || 0), 0);
+    const lastPlan = num(cell(sumRow,last)) || 0;
+    if (rest && Math.abs(lastPlan - rest) / rest < 0.02){ totalIdx = last; trios.pop(); }
+  }
+
+  const stores = trios.map((i,k) => ({
+    i,
+    name: nameAt(i) || STORE_NAMES[k] || ("Точка " + (k+1))
+  }));
+
+  // месячные план/факт: строка «Дата», иначе сумма по дням
+  const colSum = i => days.reduce((a,{row}) => a + (num(cell(row,i)) || 0), 0);
   for (const s of stores){
-    s.plan = num(cell(totalsRow, s.i));
-    s.fact = num(cell(totalsRow, s.i+1));
-    if (s.plan === null) s.plan = days.reduce((a,{row}) => a + (num(cell(row, s.i)) || 0), 0);
-    if (s.fact === null) s.fact = days.reduce((a,{row}) => a + (num(cell(row, s.i+1)) || 0), 0);
+    s.plan = totalsRow ? num(cell(totalsRow, s.i)) : null;
+    s.fact = totalsRow ? num(cell(totalsRow, s.i+1)) : null;
+    if (s.plan === null) s.plan = colSum(s.i);
+    if (s.fact === null) s.fact = colSum(s.i+1);
   }
 
-  let plan = totalIdx !== null ? num(cell(totalsRow, totalIdx)) : null;
-  let fact = totalIdx !== null ? num(cell(totalsRow, totalIdx+1)) : null;
+  let plan = (totalsRow && totalIdx !== null) ? num(cell(totalsRow, totalIdx)) : null;
+  let fact = (totalsRow && totalIdx !== null) ? num(cell(totalsRow, totalIdx+1)) : null;
   if (!plan) plan = stores.reduce((a,s) => a + s.plan, 0);
   if (!fact) fact = stores.reduce((a,s) => a + s.fact, 0);
 
