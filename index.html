@@ -74,6 +74,39 @@
   .gl{stroke:#212A34;stroke-width:1}
   .tick{fill:var(--muted);font-size:10px;font-family:Inter,sans-serif}
   .missing{margin-top:14px;font-size:13px;color:var(--muted);line-height:1.6}
+
+  /* --- таблица по дням --- */
+  .modes{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .mode{
+    background:var(--panel-2);border:1px solid var(--line);color:var(--muted);
+    padding:6px 12px;border-radius:7px;font:inherit;font-size:12px;cursor:pointer
+  }
+  .mode.on{color:var(--bg);background:var(--amber);border-color:var(--amber);font-weight:600}
+  .mode:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+
+  .tablewrap{overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:10px}
+  table.daytable{border-collapse:separate;border-spacing:0;width:100%;font-size:12px;white-space:nowrap}
+  .daytable th,.daytable td{padding:6px 10px;text-align:right;border-bottom:1px solid #1F262F}
+  .daytable thead th{
+    position:sticky;top:0;z-index:2;background:var(--panel-2);color:var(--muted);
+    font-weight:600;font-size:11px;letter-spacing:.04em;text-transform:uppercase;text-align:right
+  }
+  .daytable th.day,.daytable th.corner{
+    position:sticky;left:0;z-index:1;background:var(--panel-2);text-align:center;
+    font-family:Oswald,sans-serif;font-weight:400;color:var(--ink);min-width:44px
+  }
+  .daytable th.corner{z-index:3}
+  .daytable tr.today th.day{color:var(--amber);font-weight:600}
+  .daytable td.hit{color:#7BE0BC;background:rgba(53,192,142,.10)}
+  .daytable td.mid{color:#F5CB78;background:rgba(242,177,56,.09)}
+  .daytable td.low{color:#F09A9D;background:rgba(229,72,77,.09)}
+  .daytable td.none{color:#4E5A66}
+  .daytable td.future{background:repeating-linear-gradient(45deg,transparent,transparent 5px,#191F26 5px,#191F26 10px)}
+  .daytable td.tot,.daytable th.tot{background:rgba(255,255,255,.03);font-weight:600;border-left:1px solid var(--line)}
+  .daytable td span{display:none}
+  .daytable[data-mode="fact"] .v-fact,
+  .daytable[data-mode="pct"]  .v-pct,
+  .daytable[data-mode="plan"] .v-plan{display:inline}
   .missing b{color:var(--bad);font-weight:600}
   .err{background:#2A1416;border:1px solid var(--bad);color:#FFC9CB;padding:14px 16px;border-radius:12px;font-size:13px;line-height:1.6}
   .err code{color:var(--amber)}
@@ -261,7 +294,8 @@ function parse(data){
     if (dp === null) dp = stores.reduce((a,s) => a + (num(cell(row,s.i)) || 0), 0);
     if (df === null) df = stores.reduce((a,s) => a + (num(cell(row,s.i+1)) || 0), 0);
     const empty = stores.filter(s => num(cell(row, s.i+1)) === null).map(s => s.name);
-    return { day, plan:dp, fact:df, empty };
+    const byStore = stores.map(s => ({ plan: num(cell(row, s.i)), fact: num(cell(row, s.i+1)) }));
+    return { day, plan:dp, fact:df, empty, byStore };
   });
 
   return { stores, plan, fact, daily };
@@ -340,7 +374,22 @@ function render(data, name){
       ${dailyChart(daily, dayNow)}
       ${missingNote(daily, dayNow, isCurrent)}
     </div>
+
+    <h2>Детально по дням</h2>
+    <div class="panel">
+      <div class="modes">
+        <button class="mode on" data-mode="fact">Факт</button>
+        <button class="mode" data-mode="pct">% выполнения</button>
+        <button class="mode" data-mode="plan">План</button>
+      </div>
+      ${dayTable(daily, stores, dayNow)}
+    </div>
   `;
+
+  app.querySelectorAll(".mode").forEach(b => b.onclick = () => {
+    app.querySelectorAll(".mode").forEach(x => x.classList.toggle("on", x === b));
+    app.querySelector(".daytable").dataset.mode = b.dataset.mode;
+  });
 
   document.getElementById("status").textContent =
     "Обновлено " + now.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}) + " · вкладка " + name;
@@ -431,6 +480,39 @@ function dailyChart(daily, dayNow){
     ${labels.join("")}${bars}${planLine}
     <line class="ax" x1="${L}" y1="${Y(0)}" x2="${W-R}" y2="${Y(0)}"/>
   </svg>`;
+}
+
+/* --- таблица: день × точка --- */
+function dayTable(daily, stores, dayNow){
+  const head = `<tr><th class="corner">День</th>${
+    stores.map(s => `<th>${s.name}</th>`).join("")
+  }<th class="tot">Итого</th></tr>`;
+
+  const cellHtml = (fact, plan, future, extra) => {
+    const cl = c => `<td class="${[extra, c].filter(Boolean).join(" ")}">`;
+    if (future) return cl("future") + "</td>";
+    if (fact === null || fact === undefined)
+      return cl("none") + `<span class="v-fact">—</span><span class="v-pct">—</span>` +
+             `<span class="v-plan">${plan ? fmt(Math.round(plan)) : "—"}</span></td>`;
+    const p = plan ? fact/plan*100 : 0;
+    return cl(!plan ? "" : p >= 100 ? "hit" : p >= 60 ? "mid" : "low") +
+      `<span class="v-fact">${fmt(Math.round(fact))}</span>` +
+      `<span class="v-pct">${plan ? p.toFixed(0) + "%" : "—"}</span>` +
+      `<span class="v-plan">${plan ? fmt(Math.round(plan)) : "—"}</span></td>`;
+  };
+
+  const body = daily.map(d => {
+    const future = d.day > dayNow;
+    return `<tr${d.day === dayNow ? ' class="today"' : ""}>` +
+      `<th class="day">${d.day}</th>` +
+      d.byStore.map(c => cellHtml(c.fact, c.plan, future)).join("") +
+      cellHtml(future ? null : d.fact, d.plan, future, "tot") +
+    `</tr>`;
+  }).join("");
+
+  return `<div class="tablewrap"><table class="daytable" data-mode="fact">
+    <thead>${head}</thead><tbody>${body}</tbody></table></div>
+    <div class="missing">Зелёный — дневной план точки выполнен, жёлтый — больше 60%, красный — меньше. Прочерк — данных нет.</div>`;
 }
 
 /* --- кто не отчитался --- */
